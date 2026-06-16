@@ -390,3 +390,120 @@ EXEC usp_RegistrarTrasladoBodega
 SELECT *
 FROM Inventario
 WHERE CodigoMedicamento = 1;
+
+
+
+-- =====================================================================
+-- EJERCICIO 4 – SP Transaccional ACID con Escenarios de Prueba
+-- =====================================================================
+-- Procedimiento: usp_RegistrarTrasladoBodega
+-- Cumple con los 4 requisitos clave:
+--   1. Validar stock suficiente ANTES de iniciar transacción.
+--   2. Garantizar atomicidad (todo o nada).
+--   3. Capturar errores con TRY...CATCH y mensaje descriptivo.
+--   4. En éxito, retornar stock actualizado de ambas bodegas.
+-- =====================================================================
+CREATE PROCEDURE usp_RegistrarTrasladoBodega
+    @CodigoMedicamento  INT,
+    @CodigoBodegaOrigen INT,
+    @CodigoBodegaDestino INT,
+    @Cantidad           INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    DECLARE @StockActual INT;
+
+    BEGIN TRY
+        -- =============================================================
+        -- PUNTO 1: Validar que la bodega origen tenga stock suficiente
+        -- ANTES de iniciar la transacción.
+        -- =============================================================
+
+        -- Validación 1: Cantidad debe ser positiva
+        IF @Cantidad <= 0
+            RAISERROR('La cantidad a trasladar debe ser mayor que cero.', 16, 1);
+
+        -- Validación 2: Origen y destino no pueden ser iguales
+        IF @CodigoBodegaOrigen = @CodigoBodegaDestino
+            RAISERROR('La bodega origen y destino no pueden ser la misma.', 16, 1);
+
+        -- Obtener stock actual de la bodega origen
+        SELECT @StockActual = Stock
+        FROM Inventario
+        WHERE CodigoMedicamento = @CodigoMedicamento
+          AND CodigoBodega = @CodigoBodegaOrigen;
+
+        -- Validación 3: ¿Existe el medicamento en origen?
+        IF @StockActual IS NULL
+            RAISERROR('No existe inventario del medicamento en la bodega origen.', 16, 1);
+
+        -- Validación 4: ¿Existe el medicamento en destino?
+        IF NOT EXISTS (
+            SELECT 1
+            FROM Inventario
+            WHERE CodigoMedicamento = @CodigoMedicamento
+              AND CodigoBodega = @CodigoBodegaDestino
+        )
+            RAISERROR('No existe inventario del medicamento en la bodega destino.', 16, 1);
+
+        -- Validación 5 (LA CLAVE): ¿Stock suficiente?
+        IF @StockActual < @Cantidad
+            RAISERROR('Stock insuficiente para realizar el traslado.', 16, 1);
+
+        -- =============================================================
+        -- PUNTO 2: Garantizar atomicidad completa: si falla, nada persiste.
+        --         Todas las operaciones están dentro de una transacción.
+        -- =============================================================
+        BEGIN TRANSACTION;
+
+            -- Descontar de la bodega origen
+            UPDATE Inventario
+            SET Stock = Stock - @Cantidad
+            WHERE CodigoMedicamento = @CodigoMedicamento
+              AND CodigoBodega = @CodigoBodegaOrigen;
+
+            -- Añadir a la bodega destino
+            UPDATE Inventario
+            SET Stock = Stock + @Cantidad
+            WHERE CodigoMedicamento = @CodigoMedicamento
+              AND CodigoBodega = @CodigoBodegaDestino;
+
+        -- Si ambas actualizaciones fueron exitosas, se confirma la transacción.
+        COMMIT TRANSACTION;
+
+        -- =============================================================
+        -- PUNTO 4: En caso de éxito, retornar el stock actualizado de
+        --          ambas bodegas como confirmación.
+        -- =============================================================
+        SELECT
+            'Traslado realizado correctamente.' AS Mensaje,
+            CodigoMedicamento,
+            NombreMedicamento,
+            CodigoBodega,
+            NombreBodega,
+            StockActual,
+            StockMinimo,
+            DiferenciaStock
+        FROM ResumenInventario
+        WHERE CodigoMedicamento = @CodigoMedicamento
+          AND CodigoBodega IN (@CodigoBodegaOrigen, @CodigoBodegaDestino);
+
+    END TRY
+
+    -- =============================================================
+    -- PUNTO 3: Capturar el error con TRY...CATCH y retornar un
+    --          mensaje descriptivo al cliente.
+    -- =============================================================
+    BEGIN CATCH
+        -- Si hay una transacción abierta, se revierte (atomicidad)
+        IF @@TRANCOUNT > 0
+            ROLLBACK TRANSACTION;
+
+        -- Mensaje amigable para el usuario y detalle técnico
+        SELECT
+            'Error en el traslado. No se realizó ningún cambio en el inventario.' AS Mensaje,
+            ERROR_MESSAGE() AS DetalleError;
+    END CATCH
+END;
+GO
